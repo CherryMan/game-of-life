@@ -1,0 +1,11 @@
+[package]
+name = "game-of-life"
+version = "0.1.0"
+authors = ["Sheheryar Parvaz <me@cherryman.org>"]
+edition = "2018"
+
+[lib]
+name = "lib"
+path = "src/lib.rs"
+
+[dependencies]

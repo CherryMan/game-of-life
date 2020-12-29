@@ -1,3 +1,6 @@
+mod wasm;
+pub use wasm::*;
+
 use std::collections::{btree_set, BTreeSet};
 
 type Coord = (u16, u16);

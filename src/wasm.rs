@@ -1,21 +1,15 @@
-use super::*;
+use super::view::*;
+use super::world::*;
 use std::{cell::RefCell, rc::Rc};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::*;
 
-enum Event {
-    Reset,
-    TogglePause,
-    Step,
-    SetRate(f64),
-    ToggleCell(u16, u16),
-}
-
 #[wasm_bindgen(start)]
 pub fn start() -> Result<(), JsValue> {
     // References to useful DOM elements.
     let document = web_sys::window().unwrap().document().unwrap();
+    let body = document.body().unwrap();
 
     let rate = get_element(&document, "rate")?;
 
@@ -31,16 +25,42 @@ pub fn start() -> Result<(), JsValue> {
         .dyn_into::<CanvasRenderingContext2d>()?;
 
     // Reference to the `Game` object.
-    let game = Rc::new(RefCell::new(Game::new(64, 48)));
+    let world = Rc::new(RefCell::new(World::new()));
+    let view = Rc::new(RefCell::new(View::new()));
+
+    canvas.set_width(body.client_width() as u32);
+    canvas.set_height(body.client_height() as u32 * 8 / 10);
+
+    (*view)
+        .borrow_mut()
+        .resize(canvas.width() as usize, canvas.height() as usize);
 
     // Initial pattern
     {
-        let mut game = game.borrow_mut();
-        game.set(2, 0);
-        game.set(2, 1);
-        game.set(2, 2);
-        game.set(1, 2);
-        game.set(0, 1);
+        let mut world = world.borrow_mut();
+        world.set(2, 0);
+        world.set(2, 1);
+        world.set(2, 2);
+        world.set(1, 2);
+        world.set(0, 1);
+
+        let mut view = view.borrow_mut();
+        view.scale(2., (0, 0));
+    }
+
+    {
+        let view = view.clone();
+        let window = web_sys::window().unwrap();
+        let canvas = canvas.clone();
+        let body = body.clone();
+        let f = Closure::wrap(Box::new(move || {
+            canvas.set_width(body.client_width() as u32);
+            canvas.set_height(body.client_height() as u32);
+            (*view)
+                .borrow_mut()
+                .resize(canvas.width() as usize, canvas.height() as usize);
+        }) as Box<dyn FnMut()>);
+        f.forget();
     }
 
     // Set essential callbacks.
@@ -48,10 +68,11 @@ pub fn start() -> Result<(), JsValue> {
     {
         let canvas = canvas.clone();
         let ctx = ctx.clone();
-        let game = game.clone();
+        let world = world.clone();
+        let view = view.clone();
 
         let f = Closure::wrap(Box::new(move || {
-            redraw(&game.borrow(), &canvas, &ctx);
+            redraw(&world.borrow(), &(*view).borrow(), &canvas, &ctx);
         }) as Box<dyn FnMut()>);
 
         get_element(&document, "reset-button")?.set_onclick(Some(f.as_ref().unchecked_ref()));
@@ -60,10 +81,10 @@ pub fn start() -> Result<(), JsValue> {
 
     // Play button.
     {
-        let game = game.clone();
+        let world = world.clone();
 
         let f = Closure::wrap(Box::new(move || {
-            game.borrow_mut().step();
+            world.borrow_mut().step();
         }) as Box<dyn FnMut()>);
 
         get_element(&document, "play-button")?.set_onclick(Some(f.as_ref().unchecked_ref()));
@@ -104,13 +125,26 @@ fn get_element(document: &Document, id: &str) -> Result<HtmlElement, Element> {
         .dyn_into::<HtmlElement>()
 }
 
-fn redraw(g: &Game, c: &HtmlCanvasElement, ctx: &CanvasRenderingContext2d) {
+fn redraw(w: &World, v: &View, c: &HtmlCanvasElement, ctx: &CanvasRenderingContext2d) {
+    let (width, height) = (c.width() as f64, c.height() as f64);
+
     ctx.set_fill_style(&JsValue::from_str("white"));
     ctx.fill_rect(0., 0., c.width().into(), c.height().into());
 
-    for (x, y) in g {
-        ctx.set_fill_style(&JsValue::from_str("black"));
-        ctx.fill_rect(*x as f64 * 10., *y as f64 * 10., 10., 10.);
+    ctx.set_fill_style(&JsValue::from_str("black"));
+    ctx.set_line_width(1.);
+
+    for x in v.gridlines_x() {
+        ctx.fill_rect(x as f64, 0., 1., height);
+    }
+
+    for y in v.gridlines_y() {
+        ctx.fill_rect(0., y as f64, width, 1.);
+    }
+
+    for (x, y, w, h) in v.rects(w) {
+        log(&format!("{} {} {} {}", x, y, w, h));
+        ctx.fill_rect(x as f64, y as f64, w as f64, h as f64);
     }
 }
 

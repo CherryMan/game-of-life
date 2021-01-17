@@ -1,10 +1,9 @@
-use crate::world::{Coord, World};
-use std::{cmp, default::Default, iter::Iterator};
+use crate::world::Coord;
+use std::{cmp, default::Default, iter, iter::Iterator};
 
 pub struct View {
     orig: Coord,
     offset: (f64, f64), // [0, 1)
-    cell_dim: (f64, f64),
     viewport_dim: (usize, usize),
     zoom: f64,
 }
@@ -14,9 +13,8 @@ impl View {
         View {
             orig: (0, 0),
             offset: (0., 0.),
-            cell_dim: (10., 10.),
             viewport_dim: (0, 0),
-            zoom: 1.,
+            zoom: 10.,
         }
     }
 
@@ -25,8 +23,8 @@ impl View {
     }
 
     pub fn trans(&mut self, pdx: isize, pdy: isize) {
-        let dx = pdx as f64 / (self.cell_dim.0 * self.zoom) + self.offset.0;
-        let dy = pdy as f64 / (self.cell_dim.1 * self.zoom) + self.offset.1;
+        let dx = -pdx as f64 / self.zoom + self.offset.0;
+        let dy = -pdy as f64 / self.zoom + self.offset.1;
         let dxf = dx.floor();
         let dyf = dy.floor();
 
@@ -36,64 +34,70 @@ impl View {
         self.offset.1 = (dy - dyf).abs();
     }
 
-    pub fn scale(&mut self, factor: f64, center: (isize, isize)) {
+    pub fn update_scale<F: FnOnce(f64) -> f64>(&mut self, f: F, center: (isize, isize)) {
+        self.set_scale(f(self.zoom), center);
+    }
+
+    pub fn set_scale(&mut self, scale: f64, center: (isize, isize)) {
         self.trans(-center.0, -center.1);
-        self.zoom *= factor;
-        self.trans(center.0, center.0);
+        self.zoom = scale;
+        self.trans(center.0, center.1);
     }
 
     pub fn gridlines_x(&self) -> impl Iterator<Item = usize> {
-        let m = self.zoom * self.cell_dim.0;
-        let b = (self.offset.0 * m) as usize;
-        let n = (self.viewport_dim.0 as f64 / m) as usize;
-        let m = m as usize;
-        (0..=n).map(move |i| i * m + b)
+        let mut i = -1;
+        let zoom = self.zoom;
+        let offset = self.offset.0;
+        let dim = self.viewport_dim.0;
+        iter::from_fn(move || {
+            i += 1;
+            let r = (zoom * (i as f64 - offset)) as usize;
+            if r <= dim {
+                Some(r)
+            } else {
+                None
+            }
+        })
     }
 
     pub fn gridlines_y(&self) -> impl Iterator<Item = usize> {
-        let m = self.zoom * self.cell_dim.1;
-        let b = (self.offset.1 * m) as usize;
-        let n = (self.viewport_dim.1 as f64 / m) as usize;
-        let m = m as usize;
-        (0..=n).map(move |i| i * m + b)
+        let mut i = -1;
+        let zoom = self.zoom;
+        let offset = self.offset.1;
+        let dim = self.viewport_dim.1;
+        iter::from_fn(move || {
+            i += 1;
+            let r = (zoom * (i as f64 - offset)) as usize;
+            if r <= dim {
+                Some(r)
+            } else {
+                None
+            }
+        })
     }
 
-    /// Given a `World`, returns rectangles to draw in form (x, y, w, h).
-    pub fn rects<'a>(
+    /// Given an iterator over `Coord`s, returns rectangles to draw in form (x, y, w, h).
+    pub fn rects<'a, T: Iterator<Item = &'a Coord> + 'a>(
         &'a self,
-        w: &'a World,
+        cs: T,
     ) -> impl Iterator<Item = (usize, usize, usize, usize)> + 'a {
-        let xm = (self.zoom * self.cell_dim.0) as isize;
-        let xo = (self.offset.0 * self.zoom * self.cell_dim.0) as isize;
+        cs.filter_map(move |(x, y)| {
+            let xa = (x.wrapping_sub(self.orig.0) as f64 - self.offset.0) * self.zoom;
+            let ya = (y.wrapping_sub(self.orig.1) as f64 - self.offset.1) * self.zoom;
+            let xb = xa + self.zoom;
+            let yb = ya + self.zoom;
 
-        let ym = (self.zoom * self.cell_dim.1) as isize;
-        let yo = (self.offset.1 * self.zoom * self.cell_dim.1) as isize;
+            let xa = xa.max(0.) as usize;
+            let ya = ya.max(0.) as usize;
 
-        w.into_iter()
-            .filter(move |&&c| self.in_view(c))
-            .map(move |(x, y)| {
-                let xa = (x - self.orig.0) * xm - xo;
-                let ya = (y - self.orig.0) * ym - yo;
-                let xb = cmp::min(self.viewport_dim.0 as isize, xa + xm);
-                let yb = cmp::min(self.viewport_dim.1 as isize, ya + ym);
-                let xa = cmp::max(0, xa);
-                let ya = cmp::max(0, ya);
-                (
-                    xa as usize,
-                    ya as usize,
-                    (xb - xa) as usize,
-                    (yb - ya) as usize,
-                )
-            })
-    }
-
-    pub fn in_view(&self, (x, y): Coord) -> bool {
-        let w = (self.viewport_dim.0 as f64 / (self.zoom * self.cell_dim.0)) as isize;
-        let w = self.orig.0.wrapping_add(w);
-        let h = (self.viewport_dim.1 as f64 / (self.zoom * self.cell_dim.1)) as isize;
-        let h = self.orig.1.wrapping_add(h);
-
-        (x >= self.orig.0 || x <= w) && (y >= self.orig.1 || y <= h)
+            if xa >= self.viewport_dim.0 || ya >= self.viewport_dim.1 || xb <= 0. || yb <= 0. {
+                None
+            } else {
+                let xb = cmp::min(self.viewport_dim.0, xb as usize);
+                let yb = cmp::min(self.viewport_dim.1, yb as usize);
+                Some((xa, ya, xb - xa, yb - ya))
+            }
+        })
     }
 }
 

@@ -1,6 +1,9 @@
 use super::view::*;
 use super::world::*;
-use std::{cell::RefCell, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::*;
@@ -28,6 +31,10 @@ pub fn start() -> Result<(), JsValue> {
     let world = Rc::new(RefCell::new(World::new()));
     let view = Rc::new(RefCell::new(View::new()));
 
+    let stale = Rc::new(Cell::new(true));
+    let mdown = Rc::new(Cell::new(false));
+    let mpos = Rc::new(Cell::new((0isize, 0isize)));
+
     canvas.set_width(body.client_width() as u32);
     canvas.set_height(body.client_height() as u32 * 8 / 10);
 
@@ -45,25 +52,89 @@ pub fn start() -> Result<(), JsValue> {
         world.set(0, 1);
 
         let mut view = view.borrow_mut();
-        view.scale(2., (0, 0));
     }
 
     {
+        let stale = stale.clone();
         let view = view.clone();
         let window = web_sys::window().unwrap();
         let canvas = canvas.clone();
         let body = body.clone();
         let f = Closure::wrap(Box::new(move || {
+            stale.set(true);
             canvas.set_width(body.client_width() as u32);
             canvas.set_height(body.client_height() as u32);
             (*view)
                 .borrow_mut()
                 .resize(canvas.width() as usize, canvas.height() as usize);
+            stale.set(true);
         }) as Box<dyn FnMut()>);
         f.forget();
     }
 
-    // Set essential callbacks.
+    {
+        let stale = stale.clone();
+        let view = view.clone();
+        let f = Closure::wrap(Box::new(move |e: web_sys::WheelEvent| {
+            stale.set(true);
+
+            let scale = 1.1f64.powf(-e.delta_y() / 90.);
+            let x = e.offset_x() as isize;
+            let y = e.offset_y() as isize;
+
+            (*view).borrow_mut().update_scale(|s| (s * scale).clamp(2., 100.), (x, y));
+            e.prevent_default();
+        }) as Box<dyn FnMut(_)>);
+        canvas.add_event_listener_with_callback("wheel", f.as_ref().unchecked_ref())?;
+        f.forget();
+    }
+
+    {
+        let mdown = mdown.clone();
+        let mpos = mpos.clone();
+        let f = Closure::wrap(Box::new(move |e: web_sys::MouseEvent| {
+            mdown.set(true);
+            mpos.set((e.offset_x() as isize, e.offset_y() as isize));
+            e.prevent_default();
+        }) as Box<dyn FnMut(_)>);
+        canvas.add_event_listener_with_callback("mousedown", f.as_ref().unchecked_ref())?;
+        f.forget();
+    }
+
+    {
+        let mdown = mdown.clone();
+        let f = Closure::wrap(Box::new(move |e: web_sys::MouseEvent| {
+            mdown.set(false);
+            e.prevent_default();
+        }) as Box<dyn FnMut(_)>);
+        canvas.add_event_listener_with_callback("mouseup", f.as_ref().unchecked_ref())?;
+        f.forget();
+    }
+
+    {
+        let mdown = mdown.clone();
+        let mpos = mpos.clone();
+        let stale = stale.clone();
+        let view = view.clone();
+        let f = Closure::wrap(Box::new(move |e: web_sys::MouseEvent| {
+            if mdown.get() {
+                let (xa, ya) = mpos.get();
+                let (xb, yb) = (e.offset_x() as isize, e.offset_y() as isize);
+                let (dx, dy) = (xb - xa, yb - ya);
+
+                if dx != 0 && dy != 0 {
+                    stale.set(true);
+                    (*view).borrow_mut().trans(dx, dy);
+                }
+
+                mpos.set((xb, yb));
+            }
+            e.prevent_default();
+        }) as Box<dyn FnMut(_)>);
+        canvas.add_event_listener_with_callback("mousemove", f.as_ref().unchecked_ref())?;
+        f.forget();
+    }
+
     // Reset button.
     {
         let canvas = canvas.clone();
@@ -82,8 +153,10 @@ pub fn start() -> Result<(), JsValue> {
     // Play button.
     {
         let world = world.clone();
+        let stale = stale.clone();
 
         let f = Closure::wrap(Box::new(move || {
+            stale.set(true);
             world.borrow_mut().step();
         }) as Box<dyn FnMut()>);
 
@@ -92,28 +165,40 @@ pub fn start() -> Result<(), JsValue> {
     }
 
     // Build main game loop.
-    let f: Rc<RefCell<Option<Closure<dyn FnMut()>>>> = Rc::new(RefCell::new(None));
-    let g = f.clone();
+    {
+        let stale = stale.clone();
+        let canvas = canvas.clone();
+        let ctx = ctx.clone();
+        let world = world.clone();
+        let view = view.clone();
 
-    let window = web_sys::window().unwrap();
-    if let Some(perf) = window.performance() {
-        let time = RefCell::new(perf.now());
-        *g.borrow_mut() = Some(Closure::wrap(Box::new(move || {
-            window
-                .request_animation_frame(f.borrow().as_ref().unwrap().as_ref().unchecked_ref())
-                .unwrap();
+        let f: Rc<RefCell<Option<Closure<dyn FnMut()>>>> = Rc::new(RefCell::new(None));
+        let g = f.clone();
 
-            let t = perf.now();
-            let dt = t - *time.borrow();
+        let window = web_sys::window().unwrap();
+        if let Some(perf) = window.performance() {
+            let time = RefCell::new(perf.now());
+            *g.borrow_mut() = Some(Closure::wrap(Box::new(move || {
+                window
+                    .request_animation_frame(f.borrow().as_ref().unwrap().as_ref().unchecked_ref())
+                    .unwrap();
 
-            *time.borrow_mut() = t;
-        }) as Box<dyn FnMut()>));
+                let t = perf.now();
+                let dt = t - *time.borrow();
+
+                *time.borrow_mut() = t;
+
+                if stale.get() {
+                    redraw(&world.borrow(), &(*view).borrow(), &canvas, &ctx);
+                }
+            }) as Box<dyn FnMut()>));
+        }
+
+        let window = web_sys::window().unwrap();
+        window
+            .request_animation_frame(g.borrow().as_ref().unwrap().as_ref().unchecked_ref())
+            .unwrap();
     }
-
-    // let window = web_sys::window().unwrap();
-    // window
-    //     .request_animation_frame(g.borrow().as_ref().unwrap().as_ref().unchecked_ref())
-    //     .unwrap();
 
     Ok(())
 }
@@ -142,8 +227,7 @@ fn redraw(w: &World, v: &View, c: &HtmlCanvasElement, ctx: &CanvasRenderingConte
         ctx.fill_rect(0., y as f64, width, 1.);
     }
 
-    for (x, y, w, h) in v.rects(w) {
-        log(&format!("{} {} {} {}", x, y, w, h));
+    for (x, y, w, h) in v.rects(w.into_iter()) {
         ctx.fill_rect(x as f64, y as f64, w as f64, h as f64);
     }
 }

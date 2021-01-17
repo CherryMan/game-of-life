@@ -22,4 +22,6 @@ features = [
   'Window',
   'Performance',
   'Event',
+  'MouseEvent',
+  'WheelEvent',
 ]
